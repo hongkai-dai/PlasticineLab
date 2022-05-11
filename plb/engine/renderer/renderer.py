@@ -76,6 +76,12 @@ class Renderer:
         ti.root.dense(ti.l, self.max_num_particles).place(self.particle_x, self.particle_color)
         ti.root.dense(ti.ijk, (4, 4, 4)).dense(ti.ijk, [i//4 for i in self.voxel_res]).place(self.volume, self.sdf, self.sdf_copy, self.color_vec)
 
+        # heightmap is a field of 3D vectors. heightmap[i, j] is the x, y, z position of the topmost point
+        self.heightmap = ti.Vector.field(3, dtype=ti.f32, shape=(4 * self.voxel_res[0], 4 * self.voxel_res[1]))
+        # The grid position where we compute the height.
+        self.heightmap_x = ti.field(dtype=ti.f32, shape=4 * self.voxel_res[0])
+        self.heightmap_y = ti.field(dtype=ti.f32, shape=4 * self.voxel_res[1])
+
         # flags
         self.visualize_target = ti.field(dtype=ti.i32, shape=())
         self.visualize_primitive = ti.field(dtype=ti.i32, shape=())
@@ -130,6 +136,8 @@ class Renderer:
             self.smooth(self.sdf, self.sdf_copy, self.voxel_res)
             self.smooth(self.sdf_copy, self.sdf, self.voxel_res)
 
+        self.initialize_heightmap()
+
 
     #-----------------------------------------------------
     # sample textures
@@ -162,6 +170,37 @@ class Renderer:
         if pos.min() >= 0 and pos.max() <= 1:
             out = self.sample_tex(self.sdf, pos, self.voxel_res) - self.sdf_threshold #0.35
         return out
+
+    @ti.kernel
+    def foo(self):
+        self.calc_heightmap(1E-2)
+
+    @ti.func
+    def calc_heightmap(self, height_res):
+        count = 0
+        for i, j in ti.ndrange(self.heightmap.shape[0], self.heightmap.shape[1]):
+            z = self.sample_height(ti.Vector([self.heightmap_x[i], self.heightmap_y[j]]), height_res)
+            self.heightmap[i, j] = ti.Vector([self.heightmap_x[i], self.heightmap_y[j], z])
+            count += 1
+            if (z > self.bbox[0][2]):
+                print("heightmap", self.heightmap[i, j])
+
+
+    @ti.func
+    def sample_height(self, pos_xy, height_res):
+        """
+        Compute the maximal height of any objects in the scene at a given xy location.
+        To do so, shoot a ray from the position (pos_xy[0], pos_xy[1], box_max_height) downward, and do ray marching until this ray hits the surface sdf <= height_res
+        """
+        height = self.bbox[1][2]
+        while height > self.bbox[0][2]:
+            sdf_val = self.sample_sdf(ti.Vector([pos_xy[0], pos_xy[1], height]))
+            if (sdf_val + self.sdf_threshold < 1-0.001):
+                print(pos_xy[0], pos_xy[1], height, sdf_val)
+            if sdf_val <= height_res:
+                break
+            height -= sdf_val
+        return ti.max(height, self.bbox[0][2])
 
     @ti.func
     def sample_color(self, pos):
@@ -478,6 +517,19 @@ class Renderer:
         # reset ..
         self.volume.fill(int((1<<31)-1))
         self.build_sdf_from_particles()
+
+    @ti.func
+    def initialize_heightmap(self):
+        dx = (self.bbox[1][0] - self.bbox[0][0]) / (self.heightmap_x.shape[0] - 1)
+        dy = (self.bbox[1][1] - self.bbox[0][1]) / (self.heightmap_y.shape[0] - 1)
+        for i in range(self.heightmap_x.shape[0]):
+            self.heightmap_x[i] = i * dx + self.bbox[0][0]
+        for i in range(self.heightmap_y.shape[0]):
+            self.heightmap_y[i] = i * dy + self.bbox[0][1]
+
+        # Set the initial height to 0.
+        for i, j in ti.ndrange(self.heightmap.shape[0], self.heightmap.shape[1]):
+            self.heightmap[i, j] = ti.Vector([self.heightmap_x[i], self.heightmap_y[j], 0])
 
     def render_frame(self, spp=None, **kwargs):
         if spp is None:

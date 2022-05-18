@@ -47,6 +47,11 @@ class MPMSimulator:
         self.grid_m = ti.field(dtype=dtype, shape=res, needs_grad=True)  # grid node mass
         self.grid_v_out = ti.Vector.field(dim, dtype=dtype, shape=res, needs_grad=True)  # grid node momentum/velocity
 
+        # self.grid_heightmap[i, j] returns the maximal height of active nodes
+        # on the grid whose projection to the horizontal plane is (i, j)-th
+        # point on the grid.
+        self.grid_heightmap = ti.field(dtype=dtype, shape=res[:-1], needs_grad=False)
+
         self.gravity = ti.Vector.field(dim, dtype=dtype, shape=()) # gravity ...
         self.primitives = primitives
 
@@ -402,3 +407,30 @@ class MPMSimulator:
     def clear_and_compute_grid_m_grad(self, f):
         self.compute_grid_m_kernel.grad(f)
     """
+
+    @ti.kernel
+    def compute_heightmap(self):
+        if ti.static(self.dim == 3):
+            for i, j, k in ti.ndrange(self.n_grid, self.n_grid-1, self.n_grid):
+                # The y axis points vertically upward.
+                if j == 0:
+                    self.grid_heightmap[i, k] = 0
+                if (self.grid_m[i, j, k] > 0 and self.grid_m[i, j+1, k] == 0):
+                    # Now look at grid (i, j-1, k) and (i, j, k), and interpolate between their height based on the mass.
+                    if j == 0:
+                        self.grid_heightmap[i, k] = 0
+                    else:
+                        weight = self.grid_m[i, j-1, k] / (self.grid_m[i, j-1, k] + self.grid_m[i, j, k])
+                        self.grid_heightmap[i, k] = (j-1) * self.dx * weight + j * self.dx * (1 - weight)
+        elif ti.static(self.dim == 2):
+            for i, j in ti.ndrange(self.n_grid, self.n_grid-1):
+                if j == 0:
+                    self.grid_heightmap[i] = 0
+                if (grid.grid_m[i, j] > 0 and self.grid_m[i, j+1] == 0):
+                    weight = self.grid_m[i, j] / (self.grid_m[i, j] + self.grid_m[i, j+ 1])
+                    self.grid_heightmap[i] = j * self.dx  * weight + (j + 1) * self.dx * (1 - weight)
+        for I in ti.grouped(self.grid_heightmap):
+            if (self.grid_heightmap[I] > 0):
+                print(I, self.grid_heightmap[I])
+
+
